@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.analytics import summarize_final_prices
+from src.analytics import compute_risk_metrics, summarize_final_prices
 from src.config import TRADING_DAYS
 from src.data import fetch_prices
 from src.export import build_excel_report
@@ -108,6 +108,7 @@ def main() -> None:
         drift = custom_annual_drift / TRADING_DAYS  # annual -> daily
     paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims, seed=seed)
     stats = summarize_final_prices(paths)
+    risk = compute_risk_metrics(paths)
     report = build_excel_report(
         ticker,
         inputs={
@@ -142,6 +143,16 @@ def main() -> None:
     c5.metric("Median", f"Rs {stats['p50']:,.2f}")
     c6.metric("90th percentile", f"Rs {stats['p90']:,.2f}")
     c7.metric("Mean", f"Rs {stats['mean']:,.2f}")
+    
+    c8, c9, c10, c11 = st.columns(4)
+    c8.metric("VaR 95%", f"{risk['var']:.2%}",
+              help="Loss exceeded in only 5% of scenarios (vs today's price)")
+    c9.metric("CVaR 95%", f"{risk['cvar']:.2%}",
+              help="Average loss in the worst 5% of scenarios")
+    c10.metric("Probability of loss", f"{risk['prob_loss']:.1%}",
+               help="Share of scenarios ending below today's price")
+    c11.metric("Median max drawdown", f"{risk['median_max_drawdown']:.1%}",
+               help="Typical worst peak-to-trough fall along a path")
     st.download_button(
         "Download Excel report",
         data=report,
