@@ -51,7 +51,7 @@ def build_histogram(ticker: str, paths: np.ndarray, stats: dict) -> go.Figure:
     fig = go.Figure(go.Histogram(x=paths[-1], nbinsx=50, marker_color="steelblue"))
 
     markers = [("10th pct", stats["p10"], "red"),
-               ("Median", stats["p50"], "black"),
+               ("Median", stats["p50"], "orange"),
                ("90th pct", stats["p90"], "green")]
     for name, value, color in markers:
         fig.add_vline(x=value, line_dash="dash", line_color=color, line_width=2,
@@ -76,6 +76,16 @@ def main() -> None:
     n_sims = st.sidebar.slider("Number of simulations", 100, 5000, 1000, step=100)
     n_days = st.sidebar.slider("Forecast horizon (trading days)", 21, 504, TRADING_DAYS)
     seed = int(st.sidebar.number_input("Random seed", value=42, step=1))
+    drift_mode = st.sidebar.selectbox(
+        "Drift assumption",
+        ["Historical", "Zero drift", "Custom"],
+        help="Historical drift from 1 year is noisy. Compare how much the forecast depends on it.",
+    )
+    custom_annual_drift = 0.0
+    if drift_mode == "Custom":
+        custom_annual_drift = st.sidebar.number_input(
+            "Custom annual drift (%)", value=10.0, step=1.0
+        ) / 100
 
     if not user_input.strip():
         st.info("Enter a stock symbol in the sidebar.")
@@ -89,7 +99,12 @@ def main() -> None:
         return
 
     s0 = float(prices.iloc[-1])
-    drift, volatility = estimate_parameters(prices)
+    drift, volatility = estimate_parameters(prices) 
+    hist_drift = drift  # keep the historical value for display
+    if drift_mode == "Zero drift":
+        drift = 0.0
+    elif drift_mode == "Custom":
+        drift = custom_annual_drift / TRADING_DAYS  # annual -> daily
     paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims, seed=seed)
     stats = summarize_final_prices(paths)
 
@@ -97,7 +112,11 @@ def main() -> None:
     st.subheader(ticker)
     c1, c2, c3 = st.columns(3)
     c1.metric("Last price", f"Rs {s0:,.2f}")
-    c2.metric("Annualized drift", f"{drift * TRADING_DAYS:.2%}")
+    c2.metric(
+        "Annualized drift (used)",
+        f"{drift * TRADING_DAYS:.2%}",
+        help=f"Historical drift: {hist_drift * TRADING_DAYS:.2%}",
+    )
     c3.metric("Annualized volatility", f"{volatility * np.sqrt(TRADING_DAYS):.2%}")
 
     c4, c5, c6, c7 = st.columns(4)
