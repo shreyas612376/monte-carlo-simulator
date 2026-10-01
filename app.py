@@ -8,7 +8,13 @@ from src.analytics import compute_risk_metrics, summarize_final_prices
 from src.config import TRADING_DAYS
 from src.data import fetch_prices
 from src.export import build_excel_report
-from src.models import estimate_ewma_volatility, estimate_parameters, simulate_gbm
+from src.models import (
+    estimate_ewma_volatility,
+    estimate_parameters,
+    fit_garch,
+    simulate_garch,
+    simulate_gbm,
+)
 
 MAX_PATHS_SHOWN = 200  # drawing all paths in the browser is slow; stats use all of them
 
@@ -19,6 +25,13 @@ st.set_page_config(page_title="Monte Carlo Stock Simulator", layout="wide")
 def load_prices(ticker: str, period: str):
     """Cached wrapper so moving a slider does not re-download data."""
     return fetch_prices(ticker, period)
+
+
+@st.cache_data(ttl=3600, show_spinner="Fitting GARCH(1,1)...")
+def load_garch(ticker: str, period: str) -> dict:
+    """Cached GARCH fit so moving a slider does not refit the model."""
+    _, prices = load_prices(ticker, period)
+    return fit_garch(prices)
 
 
 def build_path_chart(ticker: str, paths: np.ndarray) -> go.Figure:
@@ -102,10 +115,16 @@ def main() -> None:
 
     vol_label = st.sidebar.selectbox(
         "Volatility estimate",
-        ["Historical (equal weight)", "EWMA (recent days weighted more)"],
-        help="EWMA gives more weight to recent days, so it reacts to volatility clusters.",
+        [
+            "Historical (equal weight)",
+            "EWMA (recent days weighted more)",
+            "GARCH(1,1) (volatility evolves daily)",
+        ],
+        help="EWMA weights recent days more. GARCH also lets volatility cluster and "
+             "mean-revert during the simulation (use a 2y or 5y lookback).",
     )
     use_ewma = vol_label.startswith("EWMA")
+    use_garch = vol_label.startswith("GARCH")
     ewma_lambda = 0.94
     if use_ewma:
         ewma_lambda = st.sidebar.slider(
@@ -128,8 +147,19 @@ def main() -> None:
     drift, volatility = estimate_parameters(prices)
 
     hist_volatility = volatility  # keep the equal-weight value for display
+    garch = None
     if use_ewma:
         volatility = estimate_ewma_volatility(prices, ewma_lambda)
+    elif use_garch:
+        if len(prices) < 500:
+            st.warning("GARCH needs about 2 years of data for stable estimates. "
+                       "Select a 2y or 5y lookback.")
+        try:
+            garch = load_garch(user_input, period)
+        except Exception as err:
+            st.error(f"GARCH fit failed: {err}")
+            return
+        volatility = float(np.sqrt(garch["next_variance"]))  # starting daily volatility
 
     hist_drift = drift  # keep the historical value for display
     if drift_mode == "Zero drift":
@@ -137,33 +167,48 @@ def main() -> None:
     elif drift_mode == "Custom":
         drift = custom_annual_drift / TRADING_DAYS  # annual -> daily
 
-    paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims,
-                         seed=seed, shock=shock, df=t_df)
+    if use_garch:
+        paths = simulate_garch(
+            s0, drift, garch["omega"], garch["alpha"], garch["beta"],
+            garch["next_variance"], n_days=n_days, n_sims=n_sims,
+            seed=seed, shock=shock, df=t_df,
+        )
+    else:
+        paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims,
+                             seed=seed, shock=shock, df=t_df)
     stats = summarize_final_prices(paths)
     risk = compute_risk_metrics(paths)
-    report = build_excel_report(
-        ticker,
-        inputs={
-            "Ticker": ticker,
-            "Last price (Rs)": s0,
-            "Historical lookback": period,
-            "Simulations": n_sims,
-            "Forecast horizon (trading days)": n_days,
-            "Random seed": seed,
-            "Drift assumption": drift_mode,
-            "Shock distribution": shock_label,
-            "Annualized drift used (%)": drift * TRADING_DAYS * 100,
-            "Annualized historical drift (%)": hist_drift * TRADING_DAYS * 100,
-            "Annualized volatility (%)": volatility * np.sqrt(TRADING_DAYS) * 100,
-            "Volatility estimate": vol_label,
-            "Annualized equal-weight volatility (%)": hist_volatility * np.sqrt(TRADING_DAYS) * 100,
-        },
-        stats=stats,
-        paths=paths,
-    )
+
+    report_inputs = {
+        "Ticker": ticker,
+        "Last price (Rs)": s0,
+        "Historical lookback": period,
+        "Simulations": n_sims,
+        "Forecast horizon (trading days)": n_days,
+        "Random seed": seed,
+        "Drift assumption": drift_mode,
+        "Shock distribution": shock_label,
+        "Annualized drift used (%)": drift * TRADING_DAYS * 100,
+        "Annualized historical drift (%)": hist_drift * TRADING_DAYS * 100,
+        "Annualized volatility (%)": volatility * np.sqrt(TRADING_DAYS) * 100,
+        "Volatility estimate": vol_label,
+        "Annualized equal-weight volatility (%)": hist_volatility * np.sqrt(TRADING_DAYS) * 100,
+    }
+    if garch is not None:
+        report_inputs.update({
+            "GARCH alpha": garch["alpha"],
+            "GARCH beta": garch["beta"],
+            "GARCH alpha + beta": garch["persistence"],
+            "GARCH long-run volatility (%)": garch["long_run_vol"] * np.sqrt(TRADING_DAYS) * 100,
+        })
+    report = build_excel_report(ticker, inputs=report_inputs, stats=stats, paths=paths)
 
     # ---- Summary metrics ----
     st.subheader(ticker)
+    vol_help = f"Equal-weight historical volatility: {hist_volatility * np.sqrt(TRADING_DAYS):.2%}"
+    if use_garch:
+        vol_help += ". Under GARCH this is the starting volatility; it evolves daily."
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Last price", f"Rs {s0:,.2f}")
     c2.metric(
@@ -174,7 +219,7 @@ def main() -> None:
     c3.metric(
         "Annualized volatility (used)",
         f"{volatility * np.sqrt(TRADING_DAYS):.2%}",
-        help=f"Equal-weight historical volatility: {hist_volatility * np.sqrt(TRADING_DAYS):.2%}",
+        help=vol_help,
     )
 
     c4, c5, c6, c7 = st.columns(4)
@@ -192,6 +237,18 @@ def main() -> None:
                help="Share of scenarios ending below today's price")
     c11.metric("Median max drawdown", f"{risk['median_max_drawdown']:.1%}",
                help="Typical worst peak-to-trough fall along a path")
+
+    if garch is not None:
+        with st.expander("GARCH(1,1) parameters"):
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("alpha (reaction to shocks)", f"{garch['alpha']:.3f}")
+            g2.metric("beta (volatility persistence)", f"{garch['beta']:.3f}")
+            g3.metric("alpha + beta", f"{garch['persistence']:.3f}",
+                      help="Close to 1 means volatility clusters last a long time.")
+            long_run = garch["long_run_vol"]
+            g4.metric("Long-run volatility",
+                      f"{long_run * np.sqrt(TRADING_DAYS):.2%}" if np.isfinite(long_run) else "n/a",
+                      help="Annualized level volatility mean-reverts to (needs alpha + beta < 1).")
 
     st.download_button(
         "Download Excel report",
