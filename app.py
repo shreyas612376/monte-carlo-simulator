@@ -7,6 +7,7 @@ import streamlit as st
 from src.analytics import summarize_final_prices
 from src.config import TRADING_DAYS
 from src.data import fetch_prices
+from src.export import build_excel_report
 from src.models import estimate_parameters, simulate_gbm
 
 MAX_PATHS_SHOWN = 200  # drawing all paths in the browser is slow; stats use all of them
@@ -107,6 +108,23 @@ def main() -> None:
         drift = custom_annual_drift / TRADING_DAYS  # annual -> daily
     paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims, seed=seed)
     stats = summarize_final_prices(paths)
+    report = build_excel_report(
+        ticker,
+        inputs={
+            "Ticker": ticker,
+            "Last price (Rs)": s0,
+            "Historical lookback": period,
+            "Simulations": n_sims,
+            "Forecast horizon (trading days)": n_days,
+            "Random seed": seed,
+            "Drift assumption": drift_mode,
+            "Annualized drift used (%)": drift * TRADING_DAYS * 100,
+            "Annualized historical drift (%)": hist_drift * TRADING_DAYS * 100,
+            "Annualized volatility (%)": volatility * np.sqrt(TRADING_DAYS) * 100,
+        },
+        stats=stats,
+        paths=paths,
+    )
 
     # ---- Summary metrics ----
     st.subheader(ticker)
@@ -124,7 +142,12 @@ def main() -> None:
     c5.metric("Median", f"Rs {stats['p50']:,.2f}")
     c6.metric("90th percentile", f"Rs {stats['p90']:,.2f}")
     c7.metric("Mean", f"Rs {stats['mean']:,.2f}")
-
+    st.download_button(
+        "Download Excel report",
+        data=report,
+        file_name=f"{ticker}_monte_carlo.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
     # ---- Charts ----
     st.plotly_chart(build_path_chart(ticker, paths), use_container_width=True)
     st.plotly_chart(build_histogram(ticker, paths, stats), use_container_width=True)
