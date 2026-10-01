@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.analytics import compute_risk_metrics, summarize_final_prices
+from src.compare import PERCENT_COLUMNS, PRICE_COLUMNS, compare_models
 from src.config import TRADING_DAYS
 from src.data import fetch_prices
 from src.export import build_excel_report
@@ -260,6 +261,33 @@ def main() -> None:
     # ---- Charts ----
     st.plotly_chart(build_path_chart(ticker, paths), use_container_width=True)
     st.plotly_chart(build_histogram(ticker, paths, stats), use_container_width=True)
+
+     # ---- Model comparison ----
+    st.subheader("Model comparison")
+    st.caption("Same drift, horizon, simulations and seed for every model. "
+               "Only the volatility and shock assumptions differ.")
+
+    garch_for_compare = garch
+    if garch_for_compare is None and len(prices) >= 500:
+        try:
+            garch_for_compare = load_garch(user_input, period)
+        except Exception:
+            garch_for_compare = None
+
+    comparison = compare_models(
+        prices, drift, n_days=n_days, n_sims=n_sims, seed=seed,
+        t_df=t_df, ewma_lambda=ewma_lambda, garch=garch_for_compare,
+    )
+
+    display = comparison.copy()
+    for col in PRICE_COLUMNS:
+        display[col] = display[col].map(lambda v: f"Rs {v:,.2f}")
+    for col in PERCENT_COLUMNS:
+        display[col] = display[col].map(lambda v: f"{v:.2%}")
+    st.dataframe(display, use_container_width=True)
+
+    if garch_for_compare is None:
+        st.info("GARCH row needs a 2y or 5y lookback.")
 
     st.caption("Scenario analysis based on historical drift and volatility. "
                "This is not a price prediction or investment advice.")
