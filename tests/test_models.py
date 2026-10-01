@@ -51,3 +51,24 @@ def test_percentiles_are_ordered():
     paths = simulate_gbm(100, 0.0005, 0.02)
     stats = summarize_final_prices(paths)
     assert stats["p10"] <= stats["p50"] <= stats["p90"]
+
+
+def _daily_log_returns(paths):
+    return np.diff(np.log(paths), axis=0).ravel()
+
+
+def test_student_t_shocks_have_unit_variance():
+    paths = simulate_gbm(100, 0.0, 0.01, n_days=252, n_sims=2000,
+                         seed=5, shock="student_t", df=5)
+    assert abs(_daily_log_returns(paths).std() - 0.01) / 0.01 < 0.03
+
+
+def test_student_t_has_fatter_tails_than_normal():
+    def kurtosis(x):
+        x = x - x.mean()
+        return (x**4).mean() / (x**2).mean() ** 2
+
+    normal = simulate_gbm(100, 0.0, 0.01, n_sims=2000, seed=5, shock="normal")
+    fat = simulate_gbm(100, 0.0, 0.01, n_sims=2000, seed=5, shock="student_t", df=5)
+    assert kurtosis(_daily_log_returns(normal)) < 3.3   # normal is about 3
+    assert kurtosis(_daily_log_returns(fat)) > 4.0      # fat tails

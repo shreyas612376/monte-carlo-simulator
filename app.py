@@ -87,12 +87,21 @@ def main() -> None:
         custom_annual_drift = st.sidebar.number_input(
             "Custom annual drift (%)", value=10.0, step=1.0
         ) / 100
-
+    shock_label = st.sidebar.selectbox(
+    "Shock distribution",
+    ["Normal", "Student-t (fat tails)"],
+    help="Student-t makes extreme daily moves more likely than the normal distribution.",
+    )
+    shock = "student_t" if shock_label.startswith("Student") else "normal"
+    t_df = 5
+    if shock == "student_t":
+        t_df = st.sidebar.slider("Degrees of freedom", 3, 30, 5,
+                                 help="Lower = fatter tails. 30 is almost normal.")
     if not user_input.strip():
         st.info("Enter a stock symbol in the sidebar.")
         return
 
-    # ---- Data + model ----
+        # ---- Data + model ----
     try:
         ticker, prices = load_prices(user_input, period)
     except ValueError as err:
@@ -100,13 +109,16 @@ def main() -> None:
         return
 
     s0 = float(prices.iloc[-1])
-    drift, volatility = estimate_parameters(prices) 
+    drift, volatility = estimate_parameters(prices)
+
     hist_drift = drift  # keep the historical value for display
     if drift_mode == "Zero drift":
         drift = 0.0
     elif drift_mode == "Custom":
         drift = custom_annual_drift / TRADING_DAYS  # annual -> daily
-    paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims, seed=seed)
+
+    paths = simulate_gbm(s0, drift, volatility, n_days=n_days, n_sims=n_sims,
+                         seed=seed, shock=shock, df=t_df)
     stats = summarize_final_prices(paths)
     risk = compute_risk_metrics(paths)
     report = build_excel_report(
@@ -119,6 +131,7 @@ def main() -> None:
             "Forecast horizon (trading days)": n_days,
             "Random seed": seed,
             "Drift assumption": drift_mode,
+            "Shock distribution": shock_label,
             "Annualized drift used (%)": drift * TRADING_DAYS * 100,
             "Annualized historical drift (%)": hist_drift * TRADING_DAYS * 100,
             "Annualized volatility (%)": volatility * np.sqrt(TRADING_DAYS) * 100,
@@ -126,7 +139,7 @@ def main() -> None:
         stats=stats,
         paths=paths,
     )
-
+    
     # ---- Summary metrics ----
     st.subheader(ticker)
     c1, c2, c3 = st.columns(3)
