@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from src.analytics import summarize_final_prices
-from src.models import estimate_parameters, simulate_gbm
+from src.models import estimate_ewma_volatility, estimate_parameters, simulate_gbm
 
 
 def test_path_shape_and_start_price():
@@ -72,3 +72,24 @@ def test_student_t_has_fatter_tails_than_normal():
     fat = simulate_gbm(100, 0.0, 0.01, n_sims=2000, seed=5, shock="student_t", df=5)
     assert kurtosis(_daily_log_returns(normal)) < 3.3   # normal is about 3
     assert kurtosis(_daily_log_returns(fat)) > 4.0      # fat tails
+
+
+
+def _prices_from_returns(returns):
+    return pd.Series(100 * np.cumprod(1 + np.asarray(returns)))
+
+
+def test_ewma_equals_sigma_for_constant_magnitude_returns():
+    returns = [0.01, -0.01] * 100
+    vol = estimate_ewma_volatility(_prices_from_returns(returns))
+    assert abs(vol - 0.01) < 1e-4
+
+
+def test_ewma_reacts_to_recent_shock_more_than_equal_weight():
+    calm = [0.005, -0.005] * 122          # 244 calm days
+    spike = [0.05, -0.05, 0.05, -0.05, 0.05]   # 5 volatile recent days
+    prices = _prices_from_returns(calm + spike)
+
+    _, equal_weight_vol = estimate_parameters(prices)
+    ewma_vol = estimate_ewma_volatility(prices)
+    assert ewma_vol > 1.5 * equal_weight_vol

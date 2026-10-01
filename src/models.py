@@ -80,3 +80,20 @@ def simulate_gbm(
 
     start = np.full((1, n_sims), s0)
     return np.vstack([start, paths])
+
+
+def estimate_ewma_volatility(prices: pd.Series, lam: float = 0.94) -> float:
+    """
+    Exponentially weighted daily volatility (RiskMetrics style).
+
+        sigma_t^2 = lam * sigma_(t-1)^2 + (1 - lam) * r_(t-1)^2
+
+    A lower lam forgets the past faster (more weight on recent days). The
+    return of the last observation gives the latest volatility estimate,
+    which is used as the forward-looking sigma.
+    """
+    if not 0 < lam < 1:
+        raise ValueError("lam must be between 0 and 1.")
+    returns = prices.pct_change().dropna()
+    ewma_variance = (returns**2).ewm(alpha=1 - lam, adjust=False).mean()
+    return float(np.sqrt(ewma_variance.iloc[-1]))

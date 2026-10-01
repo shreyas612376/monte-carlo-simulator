@@ -8,7 +8,7 @@ from src.analytics import compute_risk_metrics, summarize_final_prices
 from src.config import TRADING_DAYS
 from src.data import fetch_prices
 from src.export import build_excel_report
-from src.models import estimate_parameters, simulate_gbm
+from src.models import estimate_ewma_volatility, estimate_parameters, simulate_gbm
 
 MAX_PATHS_SHOWN = 200  # drawing all paths in the browser is slow; stats use all of them
 
@@ -77,6 +77,7 @@ def main() -> None:
     n_sims = st.sidebar.slider("Number of simulations", 100, 5000, 1000, step=100)
     n_days = st.sidebar.slider("Forecast horizon (trading days)", 21, 504, TRADING_DAYS)
     seed = int(st.sidebar.number_input("Random seed", value=42, step=1))
+
     drift_mode = st.sidebar.selectbox(
         "Drift assumption",
         ["Historical", "Zero drift", "Custom"],
@@ -87,21 +88,36 @@ def main() -> None:
         custom_annual_drift = st.sidebar.number_input(
             "Custom annual drift (%)", value=10.0, step=1.0
         ) / 100
+
     shock_label = st.sidebar.selectbox(
-    "Shock distribution",
-    ["Normal", "Student-t (fat tails)"],
-    help="Student-t makes extreme daily moves more likely than the normal distribution.",
+        "Shock distribution",
+        ["Normal", "Student-t (fat tails)"],
+        help="Student-t makes extreme daily moves more likely than the normal distribution.",
     )
     shock = "student_t" if shock_label.startswith("Student") else "normal"
     t_df = 5
     if shock == "student_t":
         t_df = st.sidebar.slider("Degrees of freedom", 3, 30, 5,
                                  help="Lower = fatter tails. 30 is almost normal.")
+
+    vol_label = st.sidebar.selectbox(
+        "Volatility estimate",
+        ["Historical (equal weight)", "EWMA (recent days weighted more)"],
+        help="EWMA gives more weight to recent days, so it reacts to volatility clusters.",
+    )
+    use_ewma = vol_label.startswith("EWMA")
+    ewma_lambda = 0.94
+    if use_ewma:
+        ewma_lambda = st.sidebar.slider(
+            "EWMA lambda", 0.80, 0.99, 0.94, step=0.01,
+            help="Higher = longer memory. 0.94 is the RiskMetrics standard for daily data.",
+        )
+
     if not user_input.strip():
         st.info("Enter a stock symbol in the sidebar.")
         return
 
-        # ---- Data + model ----
+    # ---- Data + model ----
     try:
         ticker, prices = load_prices(user_input, period)
     except ValueError as err:
@@ -110,6 +126,10 @@ def main() -> None:
 
     s0 = float(prices.iloc[-1])
     drift, volatility = estimate_parameters(prices)
+
+    hist_volatility = volatility  # keep the equal-weight value for display
+    if use_ewma:
+        volatility = estimate_ewma_volatility(prices, ewma_lambda)
 
     hist_drift = drift  # keep the historical value for display
     if drift_mode == "Zero drift":
@@ -135,11 +155,13 @@ def main() -> None:
             "Annualized drift used (%)": drift * TRADING_DAYS * 100,
             "Annualized historical drift (%)": hist_drift * TRADING_DAYS * 100,
             "Annualized volatility (%)": volatility * np.sqrt(TRADING_DAYS) * 100,
+            "Volatility estimate": vol_label,
+            "Annualized equal-weight volatility (%)": hist_volatility * np.sqrt(TRADING_DAYS) * 100,
         },
         stats=stats,
         paths=paths,
     )
-    
+
     # ---- Summary metrics ----
     st.subheader(ticker)
     c1, c2, c3 = st.columns(3)
@@ -149,14 +171,18 @@ def main() -> None:
         f"{drift * TRADING_DAYS:.2%}",
         help=f"Historical drift: {hist_drift * TRADING_DAYS:.2%}",
     )
-    c3.metric("Annualized volatility", f"{volatility * np.sqrt(TRADING_DAYS):.2%}")
+    c3.metric(
+        "Annualized volatility (used)",
+        f"{volatility * np.sqrt(TRADING_DAYS):.2%}",
+        help=f"Equal-weight historical volatility: {hist_volatility * np.sqrt(TRADING_DAYS):.2%}",
+    )
 
     c4, c5, c6, c7 = st.columns(4)
     c4.metric("10th percentile", f"Rs {stats['p10']:,.2f}")
     c5.metric("Median", f"Rs {stats['p50']:,.2f}")
     c6.metric("90th percentile", f"Rs {stats['p90']:,.2f}")
     c7.metric("Mean", f"Rs {stats['mean']:,.2f}")
-    
+
     c8, c9, c10, c11 = st.columns(4)
     c8.metric("VaR 95%", f"{risk['var']:.2%}",
               help="Loss exceeded in only 5% of scenarios (vs today's price)")
@@ -166,12 +192,14 @@ def main() -> None:
                help="Share of scenarios ending below today's price")
     c11.metric("Median max drawdown", f"{risk['median_max_drawdown']:.1%}",
                help="Typical worst peak-to-trough fall along a path")
+
     st.download_button(
         "Download Excel report",
         data=report,
         file_name=f"{ticker}_monte_carlo.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
     # ---- Charts ----
     st.plotly_chart(build_path_chart(ticker, paths), use_container_width=True)
     st.plotly_chart(build_histogram(ticker, paths, stats), use_container_width=True)
